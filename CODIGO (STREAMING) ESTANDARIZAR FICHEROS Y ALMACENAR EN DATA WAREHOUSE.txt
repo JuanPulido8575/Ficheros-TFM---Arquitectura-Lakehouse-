@@ -1,0 +1,67 @@
+# Ejemplo de cómo implementar un proceso de streaming en Spark que detecte nuevos ficheros parquet en una carpeta, aplique una transformación para
+# estandarizar el esquema y luego escriba los datos transformados en otra ubicación. En este ejemplo definimos un esquema fijo y utilizamos una
+# función de transformación para renombrar columnas y agregar las que falten.
+
+from pyspark.sql import SparkSession
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType
+from pyspark.sql.functions import lit
+
+# Iniciar la sesión Spark
+spark = SparkSession.builder.appName("StreamingEstandarizacion").getOrCreate()
+
+# Definir el esquema estándar deseado
+standard_schema = StructType([
+    StructField("nombre", StringType(), True),
+    StructField("apellido", StringType(), True),
+    StructField("edad", IntegerType(), True)
+])
+
+# Función para estandarizar el DataFrame
+def standardize_columns(df):
+    # Renombrar columnas si vienen con nombres distintos
+    for old, new in [("Nombre", "nombre"), ("Apellido", "apellido"), ("Edad", "edad")]:
+        if old in df.columns:
+            df = df.withColumnRenamed(old, new)
+    
+    # Agregar columnas faltantes según el esquema estándar
+    for field in standard_schema.fields:
+        if field.name not in df.columns:
+            df = df.withColumn(field.name, lit(None).cast(field.dataType))
+    
+    # Seleccionar las columnas en el orden definido en el esquema
+    df = df.select([field.name for field in standard_schema.fields])
+    return df
+
+# Ruta de entrada (por ejemplo, con un patrón que incluya las carpetas de cada candidato)
+input_path = "/mnt/datalake/Datos TFM/*/Voters"
+
+# Leer el stream de ficheros parquet utilizando el esquema estándar
+raw_stream = spark.readStream.schema(standard_schema).parquet(input_path)
+
+# Aplicar la transformación para estandarizar cada micro-batch
+transformed_stream = raw_stream.transform(standardize_columns)
+
+
+# Escritura en formato Delta Lake para consolidación lógica
+query = processed_streaming_df.writeStream \
+    .format("delta") \
+    .outputMode("append") \
+    .option("checkpointLocation", "abfss://<contenedor>@<cuenta>.dfs.core.windows.net/checkpoints/voters") \
+    .start("abfss://<contenedor>@<cuenta>.dfs.core.windows.net/DatosTFM/VotantesConsolidados/")
+
+# Esperar a que finalice el streaming (en un entorno real, el streaming se ejecuta continuamente)
+query.awaitTermination()
+
+
+
+# Definir la ruta de salida y el directorio de checkpoint para escribir el stream transformado
+output_path = "/mnt/datalake/Processed/Timestamped"
+checkpoint_path = "/mnt/datalake/checkpoints/processed"
+
+query = (transformed_stream.writeStream
+         .format("parquet")
+         .option("path", output_path)
+         .option("checkpointLocation", checkpoint_path)
+         .start())
+
+query.awaitTermination()
